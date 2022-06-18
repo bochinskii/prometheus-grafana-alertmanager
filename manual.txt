@@ -1,0 +1,343 @@
+--------------------------------------------------------------------------------------
+Развертывание системы монитоинга Prometheus с Grafana и преобразователем node-exporter
+--------------------------------------------------------------------------------------
+
+Вот оффициальная документация
+
+https://prometheus.io/docs/prometheus/latest/getting_started/
+
+https://prometheus.io/docs/prometheus/latest/configuration/configuration/
+
+
+
+Вот хорошая статья. примерно по ней выстроенна инфраструктура
+
+https://medium.com/southbridge/prometheus-monitoring-ba8fbda6e83
+
+
+Опишем что мы использовали.
+
+Для отображения графиков используется grafana, для хранения и управления метриками
+используется prometheus, а сами метрики на машине генерирует node_exporter.
+
+-------------
+node-exporter
+-------------
+
+https://prometheus.io/docs/guides/node-exporter/
+
+Это обычная утилита (напоминает zabbix agent'а), которая обращается к системе в которой он установлен и
+генерирует метрики, которые понятны prometheus.
+
+Отдаёт он их по пути - /metrics. То есть, он собирает, например, сколько сейчас свободной памяти,
+и записывает её под формат, который понимает prometheus.
+
+В нашем случае мы использовали вот такой exporter
+
+https://github.com/prometheus/node_exporter
+
+Если зайти на node-exporter через web клиент, то можно посмотреть все метрики, которые
+node-exporter отдает prometheus'у
+
+$ curl 127.0.0.1:9100/metrics
+
+...
+
+Подытожим.
+
+Если вы хотите мониторий некий сервер, то ставите на него определенный
+exporter.
+
+Т.е. если у вас например есть nginx и mysql сервера, то вы на них ставите
+"свой" exporter (или несколько exporters'ов в звисимости от того, какие метрики вам нужны).
+
+Настраиваете prometheus таким образом, чтобы он брал метрики с этих exporters'ов.
+
+
+
+Какие exporters'ы мы добавили еще
+
+
+
+Для того, чтобы можно было мониторить docker контейнеры используют exporter - cadvisor.
+
+https://github.com/google/cadvisor
+
+
+
+
+----------
+prometheus
+----------
+
+
+Метрик много, также много и рабочих машин. Prometheus является централизованным
+хранилищем данных метрик. Он знает, что в момент X, метрика Y, была равна Z.
+
+Разберем файл ./prometheus/prometheus.yml
+
+В начале идут довольно стандартные настройки, которые обычно не нужно менять,
+например частоту снятия метрик с хостов.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+
+...
+
+scrape_interval — интервал сбора метрик (по умолчанию — 15 секунд);
+evaluation_interval — интервал сверки с правилами (по умолчанию — 15 секунд);
+scrape_timeout — время ожидания данных;
+
+
+Prometheus умеет как сам ходить на нужный хост и забирать метрики, например, node_exporter.
+Это называется Pull модель.
+
+Так и exporter'ы умеют сами посылать метрики в prometheus. Это называется Push модель.
+
+
+Кстати, exporter'ов существует очень много. Обычно это просто утилита, которая знает
+как обратиться к приложению, и посмотреть нужные данные.
+
+Например наш node_exporter обращается к нашей системе и собирает нужные метрики.
+
+
+В секции scrape_configs мы указываем с каких хостов забирать метрики.
+Там мы указываем job'ы.
+
+scrape_configs:
+
+- job_name: prometheus
+  honor_timestamps: true
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  metrics_path: /metrics
+  scheme: http
+  static_configs:
+  - targets:
+    - localhost:9090
+
+- job_name: 'prometheus-node-exporter'
+  static_configs:
+    - targets: ['nodeexporter:9100']
+
+Грубо говоря, ты говоришь, слушай у тебя будет вот job с именем, напрмиер - prometheus.
+
+В нем настроены targets'ы (хосты, которые мы мониторим)
+
+- targets:
+  - localhost:9090
+
+Иди в такой url - localhost:9090 и собирай метрики - metrics_path: /metrics
+
+Т.е. - http://127.0.0.1:9090/metrics
+
+Делай это раз в 15 секунд, чтобы не перегружать хост:
+
+scrape_interval: 15s
+
+Остальные парамметры тезисно опишем:
+
+scheme — протокол, который будет использоваться для передачи метрик;
+
+
+
+
+У вас может возникнуть вопрос зачем тут два jobs'а. Ответ прост. С помощью job'а
+- "prometheus", prometheus метрики, которые предустановлены по-умолчанию. А с помощью
+job'а - "prometheus-node-exporter", prometheus использует метрики предоставленные
+этим exporter'ом.
+
+
+
+
+Давай-ка взглянем как выглядит наш prometheus. Заходим на prometheus через
+web интерфейс:
+
+http://localhost:9090
+
+
+В центре есть строка, где можно составить любой запрос.
+например, посмотрим сколько свободной памяти в системе
+
+
+node_memory_MemFree_bytes
+
+Если хотите в гигабайтах (скриншот - 1), то
+
+node_memory_MemFree_bytes/1000000000
+
+
+Часто ставят exporter для базы данных, они уже есть готовые под множество сервисов
+(mysql, nginx и т.д.).
+
+Это очень удобно, ведь остаётся поднять exporter, и сказать prometheus ходить на него
+и собирать метрики.
+
+
+--------
+Graphana
+--------
+
+
+Как уже стало понятно, чтобы визуализировать данные нам нужна - Grafana.
+
+Grafana оперирует таким понятием, как - Dashboard.
+
+Dashboard - это сборник графиков, под разные метрики, например график потребления памяти.
+Чтобы не создавать его самому, давай импортируем готовый.
+
+У grafana есть каталог дашбордов, вот тут -
+
+https://grafana.com/grafana/dashboards/
+
+
+Мы испортируем dashboard для нашего node_exporter, чтобы посмотреть графики
+системы (скриншоты 2 - 5).
+
+https://grafana.com/grafana/dashboards/1860
+
+
+
+Давате резюмируем:
+
+Мы подняли docker контейнер с node_exporter, который собирает данные с вашей системы, и отображает их по /metrics.
+
+Далее prometheus по Pull модели идёт, и собирает их, тк у него есть такая Job в конфиге.
+
+Потом он их сохраняет.
+
+
+После этого Grafana, в которую мы добавили нужный Dashboard с подходящими графиками, обращается к prometheus за данными, и рисует графики.
+
+
+Вот какие dashboards'ы мы добавили еще
+
+https://prometheus.io/docs/guides/cadvisor/
+
+
+https://grafana.com/grafana/dashboards/893-main/
+
+
+
+------
+Alerts
+------
+
+https://prometheus.io/docs/alerting/latest/configuration/
+
+https://hub.docker.com/r/prom/alertmanager
+
+
+
+Конфигурирования правил
+
+https://awesome-prometheus-alerts.grep.to/rules.html
+
+
+----------------------------
+Уведомления на email (gmail)
+---------------------------
+
+Для того, чтобы использовать gmail нужно создать ключ приложения (app password)
+
+https://support.google.com/accounts/answer/185833?hl=en
+
+Если коротко, то
+
+google account (https://myaccount.google.com/) --> Security --> App Passwords
+
+App Passwords - появляется только тогда, когда у вас включена двух факторная аутентификация.
+
+
+--------------------------------------------
+Уведомления на telegram. Пример с - telegram
+--------------------------------------------
+
+https://www.robustperception.io/sending-email-with-the-alertmanager-via-gmail/
+
+В telegram'е находим - BotFather.
+
+/start
+
+/newbot
+
+Вводим frandly name
+
+prometheus
+
+Вводим username
+
+prometheus_bochinskii_bot
+
+После этого BotFather выдаст вам ТОКЕН для бота
+
+
+
+
+Теперь нам нужно создать чат в который бот будет писать. Добовляем в этот чат
+бота, которого мы создали - prometheus_bochinskii_bot
+
+
+
+Теперь нам нужно узнать id данного чата. Для этого нам нужно найти - Get My ID бота.
+
+/start
+
+Переходим в ранее созданный чат и добавляем этого бота - Get My ID бота.
+Далее что нибудь пишем в чат. После этого бот - Get My ID бота выдаст вам ID чата.
+
+Теперь можно удалить этого бота из чата.
+
+--------------------------------------------
+Уведомления на telegram. Пример с - telepush
+--------------------------------------------
+
+https://muetsch.io/sending-prometheus-alerts-to-telegram-with-telepush.html
+
+Этот способ самый легкий, т.к. не нужно создавать бота и узнавать ID чата.
+
+
+
+Создаем чат. В него добавляем - TelepushBot.
+
+/start
+
+После этого TelepushBot выдаст нам токен.
+
+
+
+------------------------------------------------
+БОНУС. Проверить правильность конфигурации можно
+-----------------------------------------------
+
+
+$ docker container exec -it prometheus promtool check rules /etc/prometheus/rules.yml
+Checking /etc/prometheus/rules.yml
+  SUCCESS: 1 rules found
+
+
+$ docker container exec -it alertmanager amtool check-config /etc/alertmanager/alertmanager.yml
+Checking '/etc/alertmanager/alertmanager.yml'  SUCCESS
+Found:
+ - global config
+ - route
+ - 0 inhibit rules
+ - 1 receivers
+ - 0 templates
+
+
+
+
+ ---------------------------
+ Общие понятия о мониторинге
+ ---------------------------
+
+ Latency - сколько времени требуется сервису на обработку запросов.
+
+ Traffic - сколько запросов в еденицу времени приходит к нашему сервису
+
+ Errors - сколько ошибок
+
+ Saturation - загруженность инфраструктуры

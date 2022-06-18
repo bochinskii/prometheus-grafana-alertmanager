@@ -1,0 +1,11 @@
+groups:
+  - name: node_exporter
+    rules:
+      - alert: PrometheusTargetMissing
+        expr: up == 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A service - node_exporter on server {{ $labels.instance }} not available"
+          description: "A service - node_exporter is down or server not available\n VALUE = {{ $value }}\n LABELS = {{ $labels }}"
